@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Klaus</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      color: #fff;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      overflow: hidden;
+    }
+    canvas { display: block; }
+    #hud {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      z-index: 10;
+      font-size: 11px;
+      letter-spacing: 0.05em;
+      opacity: 0.5;
+      text-transform: uppercase;
+    }
+    #hud .name {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.15em;
+      margin-bottom: 4px;
+      opacity: 1;
+    }
+    #status {
+      position: fixed;
+      bottom: 24px;
+      left: 24px;
+      z-index: 10;
+      font-size: 10px;
+      opacity: 0.3;
+      letter-spacing: 0.05em;
+    }
+    #drop-zone {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      background: rgba(0,0,0,0.95);
+      transition: opacity 0.3s;
+    }
+    #drop-zone.hidden { opacity: 0; pointer-events: none; }
+    #drop-zone .inner {
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 12px;
+      padding: 48px 64px;
+      text-align: center;
+    }
+    #drop-zone h2 {
+      font-size: 18px;
+      font-weight: 400;
+      letter-spacing: 0.15em;
+      margin-bottom: 12px;
+    }
+    #drop-zone p {
+      font-size: 12px;
+      opacity: 0.4;
+    }
+    .drag-over .inner { border-color: rgba(255,255,255,0.5); }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div class="name">KLAUS</div>
+    <div id="anim-info">waiting for model...</div>
+  </div>
+  <div id="status">klaus-avatar v1.0</div>
+
+  <div id="drop-zone">
+    <div class="inner">
+      <h2>DROP VRM + FBX HERE</h2>
+      <p>or load files from assets/ folder</p>
+      <p style="margin-top: 16px; opacity: 0.25;">
+        1. .vrm — Wolfman avatar<br>
+        2. .fbx — Mixamo animation
+      </p>
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.172.0/examples/jsm/",
+      "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.3.3/lib/three-vrm.module.min.js"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { VRMLoaderPlugin, VRMUtils, VRMHumanBoneName } from '@pixiv/three-vrm';
+
+    // --- Scene setup ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 1.2, 3.5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1.0, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.enablePan = false;
+    controls.minDistance = 1.5;
+    controls.maxDistance = 8;
+    controls.update();
+
+    // --- Lighting (dramatic, Rams-inspired) ---
+    const ambient = new THREE.AmbientLight(0xffffff, 0.3);
+    scene.add(ambient);
+
+    const key = new THREE.DirectionalLight(0xffffff, 1.2);
+    key.position.set(2, 3, 2);
+    scene.add(key);
+
+    const fill = new THREE.DirectionalLight(0x8888ff, 0.4);
+    fill.position.set(-2, 1, -1);
+    scene.add(fill);
+
+    const rim = new THREE.DirectionalLight(0xffffff, 0.6);
+    rim.position.set(0, 2, -3);
+    scene.add(rim);
+
+    // Subtle ground plane
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(20, 20),
+      new THREE.MeshStandardMaterial({ color: 0x080808, roughness: 0.9 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // --- State ---
+    let currentVRM = null;
+    let mixer = null;
+    let currentAction = null;
+    const clock = new THREE.Clock();
+
+    // Mixamo → VRM bone name mapping
+    const MIXAMO_TO_VRM = {
+      'mixamorigHips': VRMHumanBoneName.Hips,
+      'mixamorigSpine': VRMHumanBoneName.Spine,
+      'mixamorigSpine1': VRMHumanBoneName.Chest,
+      'mixamorigSpine2': VRMHumanBoneName.UpperChest,
+      'mixamorigNeck': VRMHumanBoneName.Neck,
+      'mixamorigHead': VRMHumanBoneName.Head,
+      'mixamorigLeftShoulder': VRMHumanBoneName.LeftShoulder,
+      'mixamorigLeftArm': VRMHumanBoneName.LeftUpperArm,
+      'mixamorigLeftForeArm': VRMHumanBoneName.LeftLowerArm,
+      'mixamorigLeftHand': VRMHumanBoneName.LeftHand,
+      'mixamorigRightShoulder': VRMHumanBoneName.RightShoulder,
+      'mixamorigRightArm': VRMHumanBoneName.RightUpperArm,
+      'mixamorigRightForeArm': VRMHumanBoneName.RightLowerArm,
+      'mixamorigRightHand': VRMHumanBoneName.RightHand,
+      'mixamorigLeftUpLeg': VRMHumanBoneName.LeftUpperLeg,
+      'mixamorigLeftLeg': VRMHumanBoneName.LeftLowerLeg,
+      'mixamorigLeftFoot': VRMHumanBoneName.LeftFoot,
+      'mixamorigLeftToeBase': VRMHumanBoneName.LeftToes,
+      'mixamorigRightUpLeg': VRMHumanBoneName.RightUpperLeg,
+      'mixamorigRightLeg': VRMHumanBoneName.RightLowerLeg,
+      'mixamorigRightFoot': VRMHumanBoneName.RightFoot,
+      'mixamorigRightToeBase': VRMHumanBoneName.RightToes,
+    };
+
+    // --- VRM Loading ---
+    async function loadVRM(file) {
+      const loader = new GLTFLoader();
+      loader.register((parser) => new VRMLoaderPlugin(parser));
+
+      const url = URL.createObjectURL(file);
+      const gltf = await loader.loadAsync(url);
+      URL.revokeObjectURL(url);
+
+      const vrm = gltf.userData.vrm;
+      if (!vrm) throw new Error('No VRM data found in file');
+
+      VRMUtils.removeUnnecessaryJoints(vrm.scene);
+      VRMUtils.removeUnnecessaryVertices(vrm.scene);
+
+      // Remove old model
+      if (currentVRM) {
+        scene.remove(currentVRM.scene);
+        VRMUtils.deepDispose(currentVRM.scene);
+      }
+
+      vrm.scene.traverse((obj) => {
+        obj.frustumCulled = false;
+      });
+
+      scene.add(vrm.scene);
+      currentVRM = vrm;
+
+      // Reset camera to frame model
+      const box = new THREE.Box3().setFromObject(vrm.scene);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      controls.target.copy(center);
+      camera.position.set(center.x, center.y + size.y * 0.1, size.y * 2.5);
+      controls.update();
+
+      updateHUD('model loaded, drop .fbx animation');
+      console.log('VRM loaded:', vrm.meta);
+      return vrm;
+    }
+
+    // --- Mixamo FBX → VRM retargeted animation (live in browser) ---
+    function retargetMixamoClip(fbxScene, vrm) {
+      const clip = fbxScene.animations[0];
+      if (!clip) throw new Error('No animation in FBX');
+
+      // Build Mixamo bone map
+      const mixamoBones = {};
+      fbxScene.traverse((obj) => {
+        if (obj.isBone) mixamoBones[obj.name] = obj;
+      });
+
+      const mixamoHips = mixamoBones['mixamorigHips'];
+      const mixamoHipsHeight = mixamoHips ? mixamoHips.position.y : 1.0;
+
+      // Get VRM hips height
+      const vrmHipsBone = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips);
+      const vrmHipsPos = new THREE.Vector3();
+      vrmHipsBone.getWorldPosition(vrmHipsPos);
+      const vrmHipsHeight = vrmHipsPos.y;
+      const heightScale = vrmHipsHeight / mixamoHipsHeight;
+
+      const tracks = [];
+
+      for (const track of clip.tracks) {
+        const dotIdx = track.name.indexOf('.');
+        const boneName = track.name.substring(0, dotIdx);
+        const property = track.name.substring(dotIdx + 1);
+
+        const vrmBoneName = MIXAMO_TO_VRM[boneName];
+        if (!vrmBoneName) continue;
+
+        const vrmBoneNode = vrm.humanoid.getNormalizedBoneNode(vrmBoneName);
+        if (!vrmBoneNode) continue;
+
+        if (property === 'quaternion') {
+          // Get rest poses
+          const mixamoBone = mixamoBones[boneName];
+          const boneRestWorldRot = getWorldRestQuat(mixamoBone);
+          const parentRestWorldRot = mixamoBone.parent
+            ? getWorldRestQuat(mixamoBone.parent)
+            : new THREE.Quaternion();
+
+          const values = new Float32Array(track.values.length);
+          for (let i = 0; i < track.values.length; i += 4) {
+            const animQ = new THREE.Quaternion(
+              track.values[i], track.values[i+1], track.values[i+2], track.values[i+3]
+            );
+            const result = new THREE.Quaternion();
+            result.copy(parentRestWorldRot);
+            result.multiply(animQ);
+            result.multiply(boneRestWorldRot.clone().invert());
+
+            values[i] = result.x;
+            values[i+1] = result.y;
+            values[i+2] = result.z;
+            values[i+3] = result.w;
+          }
+
+          tracks.push(new THREE.QuaternionKeyframeTrack(
+            `${vrmBoneNode.name}.quaternion`,
+            Array.from(track.times),
+            Array.from(values)
+          ));
+
+        } else if (property === 'position' && vrmBoneName === VRMHumanBoneName.Hips) {
+          const values = new Float32Array(track.values.length);
+          for (let i = 0; i < track.values.length; i += 3) {
+            values[i] = track.values[i] * heightScale;
+            values[i+1] = track.values[i+1] * heightScale;
+            values[i+2] = track.values[i+2] * heightScale;
+          }
+
+          tracks.push(new THREE.VectorKeyframeTrack(
+            `${vrmBoneNode.name}.position`,
+            Array.from(track.times),
+            Array.from(values)
+          ));
+        }
+      }
+
+      return new THREE.AnimationClip('retargeted', clip.duration, tracks);
+    }
+
+    function getWorldRestQuat(bone) {
+      const q = new THREE.Quaternion();
+      let current = bone;
+      const chain = [];
+      while (current) {
+        chain.unshift(current);
+        current = current.parent;
+      }
+      for (const node of chain) {
+        q.multiply(node.quaternion.clone());
+      }
+      return q;
+    }
+
+    // --- FBX Loading + Retarget ---
+    async function loadFBX(file) {
+      if (!currentVRM) {
+        updateHUD('load VRM first');
+        return;
+      }
+
+      const loader = new FBXLoader();
+      const buffer = await file.arrayBuffer();
+      const fbxScene = loader.parse(buffer, '');
+
+      if (!fbxScene.animations?.length) {
+        updateHUD('no animation found in FBX');
+        return;
+      }
+
+      updateHUD('retargeting...');
+
+      const retargetedClip = retargetMixamoClip(fbxScene, currentVRM);
+
+      if (mixer) mixer.stopAllAction();
+      mixer = new THREE.AnimationMixer(currentVRM.scene);
+      currentAction = mixer.clipAction(retargetedClip);
+      currentAction.play();
+
+      const fps = Math.round(retargetedClip.tracks[0]?.times.length / retargetedClip.duration || 30);
+      updateHUD(`playing: ${retargetedClip.duration.toFixed(1)}s @ ${fps}fps`);
+    }
+
+    // --- Drag & Drop ---
+    const dropZone = document.getElementById('drop-zone');
+
+    document.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('hidden');
+      dropZone.classList.add('drag-over');
+    });
+
+    document.addEventListener('dragleave', (e) => {
+      if (!e.relatedTarget) {
+        dropZone.classList.remove('drag-over');
+        if (currentVRM) dropZone.classList.add('hidden');
+      }
+    });
+
+    document.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+
+      for (const file of e.dataTransfer.files) {
+        const name = file.name.toLowerCase();
+        if (name.endsWith('.vrm')) {
+          await loadVRM(file);
+          dropZone.classList.add('hidden');
+        } else if (name.endsWith('.fbx')) {
+          await loadFBX(file);
+          dropZone.classList.add('hidden');
+        }
+      }
+    });
+
+    // --- HUD ---
+    function updateHUD(text) {
+      document.getElementById('anim-info').textContent = text;
+    }
+
+    // --- Render loop ---
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+
+      if (mixer) mixer.update(delta);
+      if (currentVRM) currentVRM.update(delta);
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // --- Resize ---
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

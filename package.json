@@ -1,0 +1,14 @@
+{
+  "name": "klaus-avatar",
+  "version": "1.0.0",
+  "description": "Klaus wolf avatar - Mixamo FBX retargeting for VRM + SceneKit",
+  "type": "module",
+  "scripts": {
+    "retarget": "node scripts/retarget.mjs",
+    "viewer": "npx serve viewer -p 8888"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "^3.3.3",
+    "three": "^0.172.0"
+  }
+}
