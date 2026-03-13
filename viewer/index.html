@@ -39,51 +39,51 @@
       opacity: 0.3;
       letter-spacing: 0.05em;
     }
-    #drop-zone {
+    #loading {
       position: fixed;
       inset: 0;
       display: flex;
       align-items: center;
       justify-content: center;
       z-index: 100;
-      background: rgba(0,0,0,0.95);
-      transition: opacity 0.3s;
+      background: #000;
+      transition: opacity 0.6s ease;
     }
-    #drop-zone.hidden { opacity: 0; pointer-events: none; }
-    #drop-zone .inner {
-      border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 12px;
-      padding: 48px 64px;
+    #loading.hidden { opacity: 0; pointer-events: none; }
+    #loading .inner {
       text-align: center;
     }
-    #drop-zone h2 {
-      font-size: 18px;
+    #loading h2 {
+      font-size: 14px;
       font-weight: 400;
-      letter-spacing: 0.15em;
-      margin-bottom: 12px;
+      letter-spacing: 0.2em;
+      opacity: 0.6;
     }
-    #drop-zone p {
-      font-size: 12px;
-      opacity: 0.4;
+    #loading .pulse {
+      width: 4px;
+      height: 4px;
+      background: #fff;
+      border-radius: 50%;
+      margin: 16px auto 0;
+      animation: pulse 1.5s ease-in-out infinite;
     }
-    .drag-over .inner { border-color: rgba(255,255,255,0.5); }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.2; transform: scale(1); }
+      50% { opacity: 0.8; transform: scale(1.5); }
+    }
   </style>
 </head>
 <body>
   <div id="hud">
     <div class="name">KLAUS</div>
-    <div id="anim-info">waiting for model...</div>
+    <div id="anim-info">initializing...</div>
   </div>
   <div id="status">klaus-avatar v1.0</div>
 
-  <div id="drop-zone">
+  <div id="loading">
     <div class="inner">
-      <h2>DROP VRM + FBX HERE</h2>
-      <p>or load files from assets/ folder</p>
-      <p style="margin-top: 16px; opacity: 0.25;">
-        1. .vrm — Wolfman avatar<br>
-        2. .fbx — Mixamo animation
-      </p>
+      <h2>KLAUS</h2>
+      <div class="pulse"></div>
     </div>
   </div>
 
@@ -125,38 +125,75 @@
     controls.maxDistance = 8;
     controls.update();
 
-    // --- Lighting (dramatic, Rams-inspired) ---
-    const ambient = new THREE.AmbientLight(0xffffff, 0.3);
+    // --- Lighting (dramatic, cinematic three-point) ---
+    const ambient = new THREE.AmbientLight(0xffffff, 0.25);
     scene.add(ambient);
 
-    const key = new THREE.DirectionalLight(0xffffff, 1.2);
+    // Key light — warm, top-right
+    const key = new THREE.DirectionalLight(0xfff5e6, 1.4);
     key.position.set(2, 3, 2);
+    key.castShadow = true;
+    key.shadow.mapSize.set(1024, 1024);
     scene.add(key);
 
-    const fill = new THREE.DirectionalLight(0x8888ff, 0.4);
-    fill.position.set(-2, 1, -1);
+    // Fill — cool blue, left side
+    const fill = new THREE.DirectionalLight(0x6688cc, 0.35);
+    fill.position.set(-3, 1.5, 0);
     scene.add(fill);
 
-    const rim = new THREE.DirectionalLight(0xffffff, 0.6);
+    // Rim — backlight for silhouette edge
+    const rim = new THREE.DirectionalLight(0xffffff, 0.7);
     rim.position.set(0, 2, -3);
     scene.add(rim);
 
-    // Subtle ground plane
+    // Eye light — subtle catch light from below camera
+    const eye = new THREE.PointLight(0xffffff, 0.15, 5);
+    eye.position.set(0, 1.2, 2.5);
+    scene.add(eye);
+
+    // Ground
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(20, 20),
-      new THREE.MeshStandardMaterial({ color: 0x080808, roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 0.95 })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     scene.add(ground);
 
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
     // --- State ---
     let currentVRM = null;
     let mixer = null;
-    let currentAction = null;
+    let proceduralAnim = null;
     const clock = new THREE.Clock();
 
-    // Mixamo → VRM bone name mapping
+    // JSON bone name → VRMHumanBoneName
+    const JSON_BONE_MAP = {
+      'hips': VRMHumanBoneName.Hips,
+      'spine': VRMHumanBoneName.Spine,
+      'chest': VRMHumanBoneName.Chest,
+      'upperChest': VRMHumanBoneName.UpperChest,
+      'neck': VRMHumanBoneName.Neck,
+      'head': VRMHumanBoneName.Head,
+      'leftShoulder': VRMHumanBoneName.LeftShoulder,
+      'rightShoulder': VRMHumanBoneName.RightShoulder,
+      'leftUpperArm': VRMHumanBoneName.LeftUpperArm,
+      'rightUpperArm': VRMHumanBoneName.RightUpperArm,
+      'leftLowerArm': VRMHumanBoneName.LeftLowerArm,
+      'rightLowerArm': VRMHumanBoneName.RightLowerArm,
+      'leftHand': VRMHumanBoneName.LeftHand,
+      'rightHand': VRMHumanBoneName.RightHand,
+      'leftUpperLeg': VRMHumanBoneName.LeftUpperLeg,
+      'rightUpperLeg': VRMHumanBoneName.RightUpperLeg,
+      'leftLowerLeg': VRMHumanBoneName.LeftLowerLeg,
+      'rightLowerLeg': VRMHumanBoneName.RightLowerLeg,
+      'leftFoot': VRMHumanBoneName.LeftFoot,
+      'rightFoot': VRMHumanBoneName.RightFoot,
+    };
+
+    // Mixamo → VRM bone name mapping (for FBX drag-and-drop)
     const MIXAMO_TO_VRM = {
       'mixamorigHips': VRMHumanBoneName.Hips,
       'mixamorigSpine': VRMHumanBoneName.Spine,
@@ -183,21 +220,17 @@
     };
 
     // --- VRM Loading ---
-    async function loadVRM(file) {
+    async function loadVRMFromURL(url) {
       const loader = new GLTFLoader();
       loader.register((parser) => new VRMLoaderPlugin(parser));
 
-      const url = URL.createObjectURL(file);
       const gltf = await loader.loadAsync(url);
-      URL.revokeObjectURL(url);
-
       const vrm = gltf.userData.vrm;
-      if (!vrm) throw new Error('No VRM data found in file');
+      if (!vrm) throw new Error('No VRM data found');
 
       VRMUtils.removeUnnecessaryJoints(vrm.scene);
       VRMUtils.removeUnnecessaryVertices(vrm.scene);
 
-      // Remove old model
       if (currentVRM) {
         scene.remove(currentVRM.scene);
         VRMUtils.deepDispose(currentVRM.scene);
@@ -205,88 +238,163 @@
 
       vrm.scene.traverse((obj) => {
         obj.frustumCulled = false;
+        if (obj.isMesh) {
+          obj.castShadow = true;
+          obj.receiveShadow = true;
+        }
       });
 
       scene.add(vrm.scene);
       currentVRM = vrm;
 
-      // Reset camera to frame model
+      // Frame the model
       const box = new THREE.Box3().setFromObject(vrm.scene);
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
-      controls.target.copy(center);
-      camera.position.set(center.x, center.y + size.y * 0.1, size.y * 2.5);
+      controls.target.set(center.x, center.y, center.z);
+      camera.position.set(center.x + 0.3, center.y + size.y * 0.15, size.y * 2.2);
       controls.update();
 
-      updateHUD('model loaded, drop .fbx animation');
       console.log('VRM loaded:', vrm.meta);
       return vrm;
     }
 
-    // --- Mixamo FBX → VRM retargeted animation (live in browser) ---
+    async function loadVRMFromFile(file) {
+      const url = URL.createObjectURL(file);
+      try {
+        return await loadVRMFromURL(url);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    // --- Procedural JSON Animation (Klaus's format) ---
+    function applyProceduralAnimation(animData, vrm) {
+      const { keyframes, duration } = animData;
+
+      proceduralAnim = {
+        duration,
+        loop: animData.loop !== false,
+        keyframes,
+        time: 0,
+      };
+
+      updateHUD(`breathing idle — ${duration}s loop`);
+    }
+
+    function updateProceduralAnimation(delta) {
+      if (!proceduralAnim || !currentVRM) return;
+
+      proceduralAnim.time += delta;
+      if (proceduralAnim.loop) {
+        proceduralAnim.time %= proceduralAnim.duration;
+      }
+
+      const t = proceduralAnim.time;
+      const kf = proceduralAnim.keyframes;
+
+      for (const [boneName, frames] of Object.entries(kf)) {
+        if (boneName === 'hips_position') {
+          // Hip position offset
+          const vrmBone = currentVRM.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips);
+          if (!vrmBone) continue;
+          const frame = interpolateFrame(frames, t, 'position');
+          if (frame) {
+            // Apply as offset from rest position
+            vrmBone.position.y += frame[1];
+          }
+          continue;
+        }
+
+        const vrmBoneName = JSON_BONE_MAP[boneName];
+        if (!vrmBoneName) continue;
+
+        const vrmBone = currentVRM.humanoid.getNormalizedBoneNode(vrmBoneName);
+        if (!vrmBone) continue;
+
+        const rot = interpolateFrame(frames, t, 'rotation');
+        if (rot) {
+          vrmBone.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
+        }
+      }
+    }
+
+    function interpolateFrame(frames, time, prop) {
+      if (!frames || frames.length === 0) return null;
+
+      // Find surrounding keyframes
+      let prev = frames[0];
+      let next = frames[0];
+
+      for (let i = 0; i < frames.length; i++) {
+        if (frames[i].time <= time) {
+          prev = frames[i];
+          next = frames[Math.min(i + 1, frames.length - 1)];
+        } else {
+          next = frames[i];
+          break;
+        }
+      }
+
+      const val = prev[prop];
+      if (!val) return null;
+
+      // Simple case — same frame
+      if (prev === next || prev.time === next.time) return val;
+
+      // Lerp
+      const alpha = (time - prev.time) / (next.time - prev.time);
+      const nextVal = next[prop];
+      if (!nextVal) return val;
+
+      if (prop === 'rotation') {
+        // Slerp quaternions
+        const q1 = new THREE.Quaternion(val[0], val[1], val[2], val[3]);
+        const q2 = new THREE.Quaternion(nextVal[0], nextVal[1], nextVal[2], nextVal[3]);
+        q1.slerp(q2, alpha);
+        return [q1.x, q1.y, q1.z, q1.w];
+      } else {
+        // Lerp vectors
+        return val.map((v, i) => v + (nextVal[i] - v) * alpha);
+      }
+    }
+
+    // --- Mixamo FBX retarget (for drag & drop) ---
     function retargetMixamoClip(fbxScene, vrm) {
       const clip = fbxScene.animations[0];
       if (!clip) throw new Error('No animation in FBX');
 
-      // Build Mixamo bone map
       const mixamoBones = {};
-      fbxScene.traverse((obj) => {
-        if (obj.isBone) mixamoBones[obj.name] = obj;
-      });
+      fbxScene.traverse((obj) => { if (obj.isBone) mixamoBones[obj.name] = obj; });
 
       const mixamoHips = mixamoBones['mixamorigHips'];
       const mixamoHipsHeight = mixamoHips ? mixamoHips.position.y : 1.0;
-
-      // Get VRM hips height
       const vrmHipsBone = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Hips);
       const vrmHipsPos = new THREE.Vector3();
       vrmHipsBone.getWorldPosition(vrmHipsPos);
-      const vrmHipsHeight = vrmHipsPos.y;
-      const heightScale = vrmHipsHeight / mixamoHipsHeight;
+      const heightScale = vrmHipsPos.y / mixamoHipsHeight;
 
       const tracks = [];
-
       for (const track of clip.tracks) {
         const dotIdx = track.name.indexOf('.');
         const boneName = track.name.substring(0, dotIdx);
         const property = track.name.substring(dotIdx + 1);
-
         const vrmBoneName = MIXAMO_TO_VRM[boneName];
         if (!vrmBoneName) continue;
-
         const vrmBoneNode = vrm.humanoid.getNormalizedBoneNode(vrmBoneName);
         if (!vrmBoneNode) continue;
 
         if (property === 'quaternion') {
-          // Get rest poses
           const mixamoBone = mixamoBones[boneName];
-          const boneRestWorldRot = getWorldRestQuat(mixamoBone);
-          const parentRestWorldRot = mixamoBone.parent
-            ? getWorldRestQuat(mixamoBone.parent)
-            : new THREE.Quaternion();
-
+          const boneRest = getWorldRestQuat(mixamoBone);
+          const parentRest = mixamoBone.parent ? getWorldRestQuat(mixamoBone.parent) : new THREE.Quaternion();
           const values = new Float32Array(track.values.length);
           for (let i = 0; i < track.values.length; i += 4) {
-            const animQ = new THREE.Quaternion(
-              track.values[i], track.values[i+1], track.values[i+2], track.values[i+3]
-            );
-            const result = new THREE.Quaternion();
-            result.copy(parentRestWorldRot);
-            result.multiply(animQ);
-            result.multiply(boneRestWorldRot.clone().invert());
-
-            values[i] = result.x;
-            values[i+1] = result.y;
-            values[i+2] = result.z;
-            values[i+3] = result.w;
+            const q = new THREE.Quaternion(track.values[i], track.values[i+1], track.values[i+2], track.values[i+3]);
+            const r = new THREE.Quaternion().copy(parentRest).multiply(q).multiply(boneRest.clone().invert());
+            values[i] = r.x; values[i+1] = r.y; values[i+2] = r.z; values[i+3] = r.w;
           }
-
-          tracks.push(new THREE.QuaternionKeyframeTrack(
-            `${vrmBoneNode.name}.quaternion`,
-            Array.from(track.times),
-            Array.from(values)
-          ));
-
+          tracks.push(new THREE.QuaternionKeyframeTrack(`${vrmBoneNode.name}.quaternion`, Array.from(track.times), Array.from(values)));
         } else if (property === 'position' && vrmBoneName === VRMHumanBoneName.Hips) {
           const values = new Float32Array(track.values.length);
           for (let i = 0; i < track.values.length; i += 3) {
@@ -294,89 +402,45 @@
             values[i+1] = track.values[i+1] * heightScale;
             values[i+2] = track.values[i+2] * heightScale;
           }
-
-          tracks.push(new THREE.VectorKeyframeTrack(
-            `${vrmBoneNode.name}.position`,
-            Array.from(track.times),
-            Array.from(values)
-          ));
+          tracks.push(new THREE.VectorKeyframeTrack(`${vrmBoneNode.name}.position`, Array.from(track.times), Array.from(values)));
         }
       }
-
       return new THREE.AnimationClip('retargeted', clip.duration, tracks);
     }
 
     function getWorldRestQuat(bone) {
       const q = new THREE.Quaternion();
-      let current = bone;
       const chain = [];
-      while (current) {
-        chain.unshift(current);
-        current = current.parent;
-      }
-      for (const node of chain) {
-        q.multiply(node.quaternion.clone());
-      }
+      let c = bone;
+      while (c) { chain.unshift(c); c = c.parent; }
+      for (const n of chain) q.multiply(n.quaternion.clone());
       return q;
     }
 
-    // --- FBX Loading + Retarget ---
-    async function loadFBX(file) {
-      if (!currentVRM) {
-        updateHUD('load VRM first');
-        return;
-      }
-
-      const loader = new FBXLoader();
-      const buffer = await file.arrayBuffer();
-      const fbxScene = loader.parse(buffer, '');
-
-      if (!fbxScene.animations?.length) {
-        updateHUD('no animation found in FBX');
-        return;
-      }
-
-      updateHUD('retargeting...');
-
-      const retargetedClip = retargetMixamoClip(fbxScene, currentVRM);
-
-      if (mixer) mixer.stopAllAction();
-      mixer = new THREE.AnimationMixer(currentVRM.scene);
-      currentAction = mixer.clipAction(retargetedClip);
-      currentAction.play();
-
-      const fps = Math.round(retargetedClip.tracks[0]?.times.length / retargetedClip.duration || 30);
-      updateHUD(`playing: ${retargetedClip.duration.toFixed(1)}s @ ${fps}fps`);
-    }
-
-    // --- Drag & Drop ---
-    const dropZone = document.getElementById('drop-zone');
-
-    document.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropZone.classList.remove('hidden');
-      dropZone.classList.add('drag-over');
-    });
-
-    document.addEventListener('dragleave', (e) => {
-      if (!e.relatedTarget) {
-        dropZone.classList.remove('drag-over');
-        if (currentVRM) dropZone.classList.add('hidden');
-      }
-    });
-
+    // --- Drag & Drop (FBX or JSON override) ---
+    document.addEventListener('dragover', (e) => e.preventDefault());
     document.addEventListener('drop', async (e) => {
       e.preventDefault();
-      dropZone.classList.remove('drag-over');
-
       for (const file of e.dataTransfer.files) {
         const name = file.name.toLowerCase();
         if (name.endsWith('.vrm')) {
-          await loadVRM(file);
-          dropZone.classList.add('hidden');
-        } else if (name.endsWith('.fbx')) {
-          await loadFBX(file);
-          dropZone.classList.add('hidden');
+          await loadVRMFromFile(file);
+        } else if (name.endsWith('.fbx') && currentVRM) {
+          proceduralAnim = null;
+          const loader = new FBXLoader();
+          const buf = await file.arrayBuffer();
+          const fbx = loader.parse(buf, '');
+          if (!fbx.animations?.length) { updateHUD('no animation in FBX'); return; }
+          if (mixer) mixer.stopAllAction();
+          mixer = new THREE.AnimationMixer(currentVRM.scene);
+          const clip = retargetMixamoClip(fbx, currentVRM);
+          mixer.clipAction(clip).play();
+          updateHUD(`fbx: ${clip.duration.toFixed(1)}s`);
+        } else if (name.endsWith('.json') && currentVRM) {
+          const text = await file.text();
+          const animData = JSON.parse(text);
+          mixer = null;
+          applyProceduralAnimation(animData, currentVRM);
         }
       }
     });
@@ -386,20 +450,47 @@
       document.getElementById('anim-info').textContent = text;
     }
 
+    // --- Auto-load from assets/ ---
+    async function init() {
+      try {
+        updateHUD('loading wolfman...');
+
+        // Load VRM
+        await loadVRMFromURL('../assets/wolfman.vrm');
+        updateHUD('loading animation...');
+
+        // Load procedural breathing animation
+        const resp = await fetch('../assets/animations/breathing-idle.json');
+        if (resp.ok) {
+          const animData = await resp.json();
+          applyProceduralAnimation(animData, currentVRM);
+        } else {
+          updateHUD('model loaded — drop .fbx or .json to animate');
+        }
+      } catch (err) {
+        console.error('Init error:', err);
+        updateHUD('drop .vrm file to start');
+      }
+
+      // Fade out loading screen
+      document.getElementById('loading').classList.add('hidden');
+    }
+
     // --- Render loop ---
     function animate() {
       requestAnimationFrame(animate);
       const delta = clock.getDelta();
 
       if (mixer) mixer.update(delta);
+      if (proceduralAnim) updateProceduralAnimation(delta);
       if (currentVRM) currentVRM.update(delta);
 
       controls.update();
       renderer.render(scene, camera);
     }
     animate();
+    init();
 
-    // --- Resize ---
     window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
