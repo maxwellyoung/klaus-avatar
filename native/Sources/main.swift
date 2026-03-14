@@ -2,6 +2,8 @@ import AppKit
 import SceneKit
 import VRMKit
 import VRMSceneKit
+import Speech
+import AVFoundation
 
 // --- Gateway ---
 let GATEWAY_URL = "http://100.124.74.30:18789"
@@ -167,12 +169,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var bubbleHideTimer: DispatchWorkItem?
     var streamingText = ""
 
+    // Voice input
+    var audioEngine: AVAudioEngine?
+    var speechRecognizer: SFSpeechRecognizer?
+    var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    var recognitionTask: SFSpeechRecognitionTask?
+    var isListeningVoice = false
+    var micButton: NSButton!
+
+    // Eye tracking
+    var eyeTrackingTimer: Timer?
+    var leftEyeBone: SCNNode?
+    var rightEyeBone: SCNNode?
+
     var scene: SCNScene!
     var cameraNode: SCNNode!
 
     // ---- Launch ----
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)  // visible in Cmd+Tab
 
         let cfg = ViewModeConfig.config(for: currentMode)
         let rect = NSRect(x: 0, y: 0, width: cfg.width, height: cfg.height)
@@ -229,6 +244,166 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeFirstResponder(chatField)
 
         resetSystemPrompt()
+
+        // Voice input setup
+        setupVoiceInput()
+
+        // Eye tracking — follow mouse cursor
+        startEyeTracking()
+    }
+
+    // ============================================================
+    // MARK: - Voice Input (Whisper-style)
+    // ============================================================
+
+    func setupVoiceInput() {
+        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        audioEngine = AVAudioEngine()
+
+        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+            DispatchQueue.main.async {
+                if status != .authorized {
+                    print("Speech recognition not authorized: \(status.rawValue)")
+                }
+                self?.micButton?.isEnabled = (status == .authorized)
+            }
+        }
+    }
+
+    @objc func toggleVoiceInput() {
+        if isListeningVoice {
+            stopListening()
+        } else {
+            startListening()
+        }
+    }
+
+    func startListening() {
+        guard let recognizer = speechRecognizer, recognizer.isAvailable,
+              let engine = audioEngine else {
+            showBubble("Speech recognition unavailable")
+            return
+        }
+
+        // Cancel any existing task
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        self.recognitionRequest = request
+
+        let inputNode = engine.inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+            request.append(buffer)
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            showBubble("Mic error: \(error.localizedDescription)")
+            return
+        }
+
+        isListeningVoice = true
+        micButton.title = "●"
+        micButton.contentTintColor = NSColor.systemRed
+        transitionTo(.listening)
+
+        // Show live transcription in the input field
+        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self = self else { return }
+
+            if let result = result {
+                let text = result.bestTranscription.formattedString
+                DispatchQueue.main.async {
+                    self.chatField.stringValue = text
+                }
+
+                if result.isFinal {
+                    DispatchQueue.main.async {
+                        self.stopListening()
+                        // Auto-send after final transcription
+                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            self.sendMessage()
+                        }
+                    }
+                }
+            }
+
+            if error != nil {
+                DispatchQueue.main.async {
+                    self.stopListening()
+                }
+            }
+        }
+
+        // Auto-stop after 30 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            if self?.isListeningVoice == true {
+                self?.stopListening()
+                self?.sendMessage()
+            }
+        }
+    }
+
+    func stopListening() {
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionRequest = nil
+        recognitionTask = nil
+        isListeningVoice = false
+
+        micButton?.title = "🎤"
+        micButton?.contentTintColor = NSColor(white: 0.5, alpha: 1)
+
+        if avatarState == .listening {
+            transitionTo(.idle)
+        }
+    }
+
+    // ============================================================
+    // MARK: - Eye Tracking (follow mouse)
+    // ============================================================
+
+    func startEyeTracking() {
+        // Accept mouse moved events
+        window.acceptsMouseMovedEvents = true
+
+        // Poll mouse position at 30fps
+        eyeTrackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in
+            self?.updateEyeTracking()
+        }
+    }
+
+    func updateEyeTracking() {
+        guard let root = vrmNode, avatarState == .idle || avatarState == .listening else { return }
+        let bones = currentAvatar.bones
+
+        guard let headBone = findBone(bones.head, in: root) else { return }
+
+        // Mouse position relative to window center, normalized to -1..1
+        let mouse = NSEvent.mouseLocation
+        let win = window.frame
+        let dx = max(-1, min(1, (mouse.x - win.midX) / 400.0))
+        let dy = max(-1, min(1, (mouse.y - win.midY) / 400.0))
+
+        // Subtle head turn toward cursor (model faces -Z, rotated pi)
+        // Use SCNAction for smooth following that doesn't fight keyframe anims
+        let targetZ = CGFloat(dx) * 0.12   // left-right tilt
+        let targetX = CGFloat(-dy) * 0.06  // up-down nod
+
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0.2
+        // Apply as relative offsets from idle head position
+        // The idle pose sets head.x += 0.05, so our base is ~0.05
+        headBone.eulerAngles.z = targetZ
+        SCNTransaction.commit()
     }
 
     func resetSystemPrompt() {
@@ -562,6 +737,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cameraNode.look(at: SCNVector3(0, currentAvatar.cameraY, 0))
         scene.rootNode.addChildNode(cameraNode)
 
+        // Use autoenablesDefaultLighting as a baseline
+        sceneView.autoenablesDefaultLighting = true
+
+        let lookAt = SCNVector3(0, currentAvatar.cameraY, 0)
+
         func addLight(_ type: SCNLight.LightType, color: NSColor, intensity: CGFloat,
                       pos: SCNVector3, shadow: Bool = false) {
             let light = SCNLight()
@@ -577,18 +757,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let node = SCNNode()
             node.light = light
             node.position = pos
-            if type != .ambient { node.look(at: SCNVector3(0, 0.8, 0)) }
+            if type != .ambient { node.look(at: lookAt) }
             scene.rootNode.addChildNode(node)
         }
 
-        addLight(.directional, color: NSColor(red: 1, green: 0.95, blue: 0.9, alpha: 1),
-                 intensity: 1200, pos: SCNVector3(2, 3, 2), shadow: true)
-        addLight(.directional, color: NSColor(red: 0.5, green: 0.6, blue: 0.9, alpha: 1),
-                 intensity: 400, pos: SCNVector3(-3, 1.5, 1))
-        addLight(.directional, color: NSColor(red: 1, green: 0.9, blue: 0.8, alpha: 1),
-                 intensity: 600, pos: SCNVector3(0, 2, -3))
-        addLight(.ambient, color: NSColor(red: 0.18, green: 0.16, blue: 0.2, alpha: 1),
-                 intensity: 350, pos: SCNVector3(0, 0, 0))
+        // Key — warm from front-right
+        addLight(.directional, color: NSColor(red: 1, green: 0.97, blue: 0.92, alpha: 1),
+                 intensity: 1400, pos: SCNVector3(2, 3, 3), shadow: true)
+        // Fill — cool blue from left
+        addLight(.directional, color: NSColor(red: 0.6, green: 0.7, blue: 1.0, alpha: 1),
+                 intensity: 600, pos: SCNVector3(-3, 2, 2))
+        // Rim — backlight
+        addLight(.directional, color: NSColor(red: 1, green: 0.95, blue: 0.85, alpha: 1),
+                 intensity: 800, pos: SCNVector3(0, 2.5, -3))
+        // Strong ambient so model is never a black silhouette
+        addLight(.ambient, color: NSColor(white: 0.35, alpha: 1),
+                 intensity: 600, pos: SCNVector3(0, 0, 0))
     }
 
     // ============================================================
@@ -670,7 +854,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         inputContainer.autoresizingMask = [.width]
         parent.addSubview(inputContainer)
 
-        chatField = NSTextField(frame: NSRect(x: 14, y: 6, width: cfg.width - 58, height: 28))
+        // Mic button (left side)
+        micButton = NSButton(frame: NSRect(x: 8, y: 6, width: 28, height: 28))
+        micButton.isBordered = false
+        micButton.title = "🎤"
+        micButton.font = NSFont.systemFont(ofSize: 13)
+        micButton.contentTintColor = NSColor(white: 0.5, alpha: 1)
+        micButton.target = self; micButton.action = #selector(toggleVoiceInput)
+        inputContainer.addSubview(micButton)
+
+        chatField = NSTextField(frame: NSRect(x: 38, y: 6, width: cfg.width - 82, height: 28))
         chatField.isBordered = false; chatField.drawsBackground = false
         chatField.textColor = .white; chatField.font = NSFont.systemFont(ofSize: 13)
         chatField.placeholderAttributedString = NSAttributedString(
